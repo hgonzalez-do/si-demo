@@ -26,6 +26,14 @@ npm start
 
 The server listens on `http://localhost:3000` by default.
 
+`.env` is optional — if it isn't present, the server reads the same variables straight from the environment. Exporting them in your shell, container, or deployment platform works too:
+
+```sh
+DO_INFERENCE_KEY=sk-do-... DEFAULT_ROUTER=router:your-router-name npm start
+```
+
+When both are set, real environment variables take precedence over values in `.env`.
+
 ## Configuration
 
 Only two values are externalized — everything else (base URL, paths, model lists, UI defaults, branding) lives as inline constants in `server.js` so the demo runs with minimal env setup.

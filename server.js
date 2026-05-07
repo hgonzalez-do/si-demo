@@ -7,7 +7,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const API_KEY = process.env.DO_INFERENCE_KEY;
 if (!API_KEY) {
-  console.error('Missing required env var: DO_INFERENCE_KEY. Copy .env.example to .env and fill in the value.');
+  console.error('Missing required env var: DO_INFERENCE_KEY. Set it in your environment, or copy .env.example to .env and fill it in.');
   process.exit(1);
 }
 
