@@ -79,7 +79,35 @@ function requireSession(req, res) {
 }
 
 function pathname(req) {
-  return req.url.split('?')[0];
+  try {
+    let p = req.url.split('?')[0];
+    p = decodeURIComponent(p);
+    p = p.replace(/\/{2,}/g, '/');
+    if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
+    return p;
+  } catch {
+    let p = req.url.split('?')[0];
+    if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
+    return p;
+  }
+}
+
+function parseAsyncInvokeRoute(path) {
+  const prefix = '/api/async-invoke/';
+  if (!path.startsWith(prefix)) return null;
+  const tail = path.slice(prefix.length);
+  if (!tail || tail.includes('..')) return null;
+  const statusSuffix = '/status';
+  if (tail.endsWith(statusSuffix)) {
+    const id = tail.slice(0, -statusSuffix.length);
+    if (!id) return null;
+    return { kind: 'status', id };
+  }
+  return { kind: 'result', id: tail };
+}
+
+function isSafeAsyncInvokeId(id) {
+  return typeof id === 'string' && /^[0-9a-fA-F-]{8,128}$/.test(id);
 }
 
 const API_KEY = process.env.DO_INFERENCE_KEY;
@@ -94,6 +122,7 @@ const BASE = 'https://inference.do-ai.run';
 const PATH_MODELS = '/v1/models';
 const PATH_CHAT = '/v1/chat/completions';
 const PATH_IMAGES = '/v1/images/generations';
+const PATH_ASYNC_INVOKE = '/v1/async-invoke';
 
 const PUBLIC_CONFIG = {
   brandTitle: 'Inference Demo',
@@ -103,6 +132,7 @@ const PUBLIC_CONFIG = {
   apiPathModels: PATH_MODELS,
   apiPathChat: PATH_CHAT,
   apiPathImages: PATH_IMAGES,
+  apiPathAsyncInvoke: PATH_ASYNC_INVOKE,
   fallbackModels: [
     'llama3.3-70b-instruct',
     'openai-gpt-oss-120b',
@@ -120,6 +150,8 @@ const PUBLIC_CONFIG = {
   ],
   preferredModels: ['anthropic-claude-haiku-4.5', 'llama3.3-70b-instruct'],
   imageModels: ['openai-gpt-image-1', 'openai-gpt-image-1.5', 'fal-ai/flux/schnell', 'fal-ai/fast-sdxl'],
+  audioGenModels: ['fal-ai/stable-audio-25/text-to-audio'],
+  audioTtsModels: ['fal-ai/elevenlabs/tts/multilingual-v2'],
   imageSizes: ['1024x1024', '1024x1536', '1536x1024'],
   defaultImageSize: '1024x1024',
   defaultImageCount: 1,
@@ -242,6 +274,59 @@ async function handleImage(req, res) {
   }
 }
 
+async function handleAsyncInvoke(req, res) {
+  const body = await readBody(req);
+  const t0 = Date.now();
+  const r = await doFetch(PATH_ASYNC_INVOKE, { method: 'POST', body });
+  const latency_ms = Date.now() - t0;
+  res.writeHead(r.status, { 'Content-Type': 'application/json' });
+  try {
+    const data = JSON.parse(r.text);
+    data.latency_ms = latency_ms;
+    res.end(JSON.stringify(data));
+  } catch {
+    res.end(JSON.stringify({ error: r.text, latency_ms }));
+  }
+}
+
+async function handleAsyncInvokeStatus(req, res, id) {
+  if (!isSafeAsyncInvokeId(id)) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'invalid_request_id' }));
+    return;
+  }
+  const t0 = Date.now();
+  const r = await doFetch(`${PATH_ASYNC_INVOKE}/${id}/status`, { method: 'GET' });
+  const latency_ms = Date.now() - t0;
+  res.writeHead(r.status, { 'Content-Type': 'application/json' });
+  try {
+    const data = JSON.parse(r.text);
+    data.latency_ms = latency_ms;
+    res.end(JSON.stringify(data));
+  } catch {
+    res.end(JSON.stringify({ error: r.text, latency_ms }));
+  }
+}
+
+async function handleAsyncInvokeResult(req, res, id) {
+  if (!isSafeAsyncInvokeId(id)) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'invalid_request_id' }));
+    return;
+  }
+  const t0 = Date.now();
+  const r = await doFetch(`${PATH_ASYNC_INVOKE}/${id}`, { method: 'GET' });
+  const latency_ms = Date.now() - t0;
+  res.writeHead(r.status, { 'Content-Type': 'application/json' });
+  try {
+    const data = JSON.parse(r.text);
+    data.latency_ms = latency_ms;
+    res.end(JSON.stringify(data));
+  } catch {
+    res.end(JSON.stringify({ error: r.text, latency_ms }));
+  }
+}
+
 async function handleCompare(req, res) {
   const { models = [], messages = [], max_completion_tokens, temperature } = JSON.parse(await readBody(req));
   const results = await Promise.all(
@@ -268,8 +353,24 @@ async function handleCompare(req, res) {
 }
 
 async function serveStatic(req, res) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(405, { 'Content-Type': 'application/json', Allow: 'GET, HEAD' });
+    res.end(
+      JSON.stringify({
+        error: 'method_not_allowed',
+        hint: 'Run the demo API with npm start from the project root; plain static hosts have no /api routes.'
+      })
+    );
+    return;
+  }
   let p = req.url === '/' ? '/index.html' : req.url;
   p = p.split('?')[0];
+  try {
+    p = decodeURIComponent(p);
+    p = p.replace(/\/{2,}/g, '/');
+  } catch {
+    /* use raw path */
+  }
   const filePath = join(__dirname, 'public', p);
   try {
     const s = await stat(filePath);
@@ -299,12 +400,32 @@ const server = createServer(async (req, res) => {
       if (!requireSession(req, res)) return;
       return handleImage(req, res);
     }
+    if (path === '/api/async-invoke' && req.method === 'POST') {
+      if (!requireSession(req, res)) return;
+      return handleAsyncInvoke(req, res);
+    }
+    if (path.startsWith('/api/async-invoke/') && req.method === 'GET') {
+      if (!requireSession(req, res)) return;
+      const parsed = parseAsyncInvokeRoute(path);
+      if (!parsed) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'not_found' }));
+        return;
+      }
+      if (parsed.kind === 'status') return handleAsyncInvokeStatus(req, res, parsed.id);
+      return handleAsyncInvokeResult(req, res, parsed.id);
+    }
     if (path === '/api/models' && req.method === 'GET') {
       if (!requireSession(req, res)) return;
       return handleModels(req, res);
     }
     if (path === '/api/config' && req.method === 'GET') return handleConfig(req, res);
     if (path === '/api/session' && req.method === 'POST') return handleSession(req, res);
+    if (path.startsWith('/api/')) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unknown_api_route', path }));
+      return;
+    }
     return serveStatic(req, res);
   } catch (e) {
     res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -313,7 +434,8 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`\n${PUBLIC_CONFIG.brandTitle} → http://localhost:${PORT}\n`);
+  console.log(`\n${PUBLIC_CONFIG.brandTitle} → http://localhost:${PORT}`);
+  console.log('API routes: /api/config, /api/models, /api/chat, /api/compare, /api/image, POST /api/async-invoke, GET /api/async-invoke/:id(/status)\n');
   if (ACCESS_REQUIRED) {
     console.log('[si-demo] Page access gate on — unlock with PAGE_ACCESS_PASSWORD.');
     if (SESSION_KEY_EPHEMERAL) {

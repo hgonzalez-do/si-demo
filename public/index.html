@@ -36,12 +36,20 @@
   </div>
 </header>
 
+<div id="backend-warning" class="backend-warning" hidden role="alert">
+  <strong>Demo API not reachable.</strong>
+  This UI must be opened through the Node server so <code>/api/*</code> exists (including <code>POST /api/async-invoke</code>).
+  From the project folder run <code>npm start</code>, then use <code>http://localhost:3000</code>.
+  Opening only <code>public/index.html</code> or using a static server on port 3000 will show this page but API calls will 404.
+</div>
+
 <div class="tabs">
   <div class="tabs-left">
     <button class="tab active" data-panel="single">Serverless Inference</button>
     <button class="tab" data-panel="compare">Compare</button>
     <button class="tab" data-panel="router">Router</button>
     <button class="tab" data-panel="image">Images</button>
+    <button class="tab" data-panel="audio">Audio</button>
   </div>
   <button class="glossary-toggle" id="glossary-toggle" aria-pressed="true">
     <span id="glossary-toggle-label">Hide glossary</span>
@@ -215,7 +223,7 @@
 
         <label for="i-model">Model</label>
         <select id="i-model"></select>
-        <div class="hint"><code>gpt-image</code> and <code>stable-diffusion</code> models ship enabled by default. Other models like <code>fal-ai/*</code> may need enablement on your account.</div>
+        <div class="hint">Pulled live from /v1/models, <code>gpt-image</code> and <code>stable-diffusion</code> models are enabled by default. Other models like <code>fal-ai/*</code> may need enablement on your account.</div>
 
         <label for="i-prompt">Prompt</label>
         <textarea id="i-prompt" placeholder="Describe the image…">A minimalist flat illustration of a small blue robot holding an umbrella in the rain, soft pastel sky, isometric perspective.</textarea>
@@ -255,6 +263,54 @@
           </div>
           <div class="image-output" id="i-body">
             <div class="placeholder">Your generated image will appear here.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- AUDIO (fal async-invoke: TTS + text-to-audio) -->
+  <section class="panel" id="panel-audio">
+    <div class="eyebrow">Audio generation</div>
+    <h1>Same endpoint. Same key. Async Audio generation.</h1>
+    <p class="sub">Text-to-speech and text-to-audio use the same async pipeline on <code data-cfg="inferenceHost">—</code>: start a job, poll <code>/status</code>, then fetch the result URL — same pattern as image fal flows in the docs.</p>
+
+    <div class="grid">
+      <div class="card">
+        <h3>Request</h3>
+
+        <div class="row a-mode-row">
+          <label class="a-radio"><input type="radio" name="a-mode" value="generate" checked /> Text-to-audio</label>
+          <label class="a-radio"><input type="radio" name="a-mode" value="tts" /> Text-to-speech</label>
+        </div>
+
+        <label for="a-model">Model</label>
+        <select id="a-model"></select>
+        <div class="hint">Pulled live from /v1/models, for this async demo Fal-ai models are used to generate <code>text-to-audio</code> and <code>text-to-speech</code></div>
+
+        <label for="a-primary" id="a-label-primary">Prompt (describe the audio)</label>
+        <textarea id="a-primary" rows="4" placeholder="Describe music or paste speech…">Short ambient pad with soft synth and light rain texture.</textarea>
+
+        <div class="row" id="a-row-seconds">
+          <div>
+            <label for="a-seconds">Duration (seconds)</label>
+            <input type="number" id="a-seconds" value="30" min="5" max="120" />
+          </div>
+        </div>
+
+        <button class="primary" id="a-send">Generate audio</button>
+        <div class="hint">Async jobs can take a minute. This tab polls status until the file URL is ready.</div>
+      </div>
+
+      <div>
+        <div class="card result audio-result" id="a-result">
+          <div class="meta" id="a-meta">
+            <div>Phase · <strong>—</strong></div>
+            <div>Latency · <strong>—</strong></div>
+            <div>Model · <strong>—</strong></div>
+          </div>
+          <div class="audio-output" id="a-body">
+            <div class="placeholder">Audio player and job details will appear here.</div>
           </div>
         </div>
       </div>
@@ -339,6 +395,10 @@
       <dd>Same platform, same key — but the model draws instead of types. Response is a <code>b64_json</code> image you can show or save.</dd>
     </dl>
     <dl class="sb-term">
+      <dt>Async invoke (fal audio)</dt>
+      <dd><code>POST /v1/async-invoke</code> starts a background job and returns a <code>request_id</code>. Poll <code>GET …/async-invoke/&lt;id&gt;/status</code>, then <code>GET …/async-invoke/&lt;id&gt;</code> for the finished payload with a downloadable media URL.</dd>
+    </dl>
+    <dl class="sb-term">
       <dt>Multimodal</dt>
       <dd>Text, images, embeddings, and audio all on one inference platform. One bill, one SDK, one account.</dd>
     </dl>
@@ -360,6 +420,8 @@
 <script>
   const SESSION_STORAGE_KEY = 'si_demo_session_token';
   let appCfg = {};
+  let audioGenModelIds = [];
+  let audioTtsModelIds = [];
 
   async function apiFetch(url, options = {}) {
     const headers = { ...(options.headers || {}) };
@@ -410,6 +472,34 @@
     'fal-ai/flux/schnell',
     'fal-ai/fast-sdxl'
   ];
+
+  const FALLBACK_AUDIO_GEN = ['fal-ai/stable-audio-25/text-to-audio'];
+  const FALLBACK_AUDIO_TTS = ['fal-ai/elevenlabs/tts/multilingual-v2'];
+
+  function partitionAudioModels(ids) {
+    const gen = [];
+    const tts = [];
+    const seenG = new Set();
+    const seenT = new Set();
+    for (const id of ids) {
+      if (!id) continue;
+      const l = String(id).toLowerCase();
+      if (l.includes('elevenlabs') || l.includes('multilingual-tts') || l.includes('/tts')) {
+        if (!seenT.has(id)) {
+          seenT.add(id);
+          tts.push(id);
+        }
+      } else if (l.includes('stable-audio') || l.includes('text-to-audio')) {
+        if (!seenG.has(id)) {
+          seenG.add(id);
+          gen.push(id);
+        }
+      }
+    }
+    gen.sort((a, b) => a.localeCompare(b));
+    tts.sort((a, b) => a.localeCompare(b));
+    return { gen, tts };
+  }
 
   function filterLikelyImageModels(ids) {
     const seen = new Set();
@@ -477,6 +567,19 @@
     const imagePreferred = ['openai-gpt-image-1', 'openai-gpt-image-1.5', imageIds[0]].find((x) => imageIds.includes(x));
     if (imagePreferred) iSelect.value = imagePreferred;
     else if (imageIds.includes(prevImage)) iSelect.value = prevImage;
+
+    const part = partitionAudioModels(ids);
+    audioGenModelIds = part.gen.length
+      ? part.gen
+      : Array.isArray(appCfg.audioGenModels) && appCfg.audioGenModels.length
+        ? [...appCfg.audioGenModels]
+        : [...FALLBACK_AUDIO_GEN];
+    audioTtsModelIds = part.tts.length
+      ? part.tts
+      : Array.isArray(appCfg.audioTtsModels) && appCfg.audioTtsModels.length
+        ? [...appCfg.audioTtsModels]
+        : [...FALLBACK_AUDIO_TTS];
+    refreshAudioModelSelect();
   }
 
   // Single send
@@ -609,6 +712,28 @@
   function escapeHtml(s) {
     return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
   }
+
+  function refreshAudioModelSelect() {
+    const modeEl = document.querySelector('input[name="a-mode"]:checked');
+    const mode = modeEl ? modeEl.value : 'generate';
+    const list = mode === 'tts' ? audioTtsModelIds : audioGenModelIds;
+    const sel = document.getElementById('a-model');
+    const prev = sel.value;
+    sel.innerHTML = list.map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join('');
+    if (list.includes(prev)) sel.value = prev;
+
+    const secRow = document.getElementById('a-row-seconds');
+    if (secRow) secRow.hidden = mode === 'tts';
+
+    const lab = document.getElementById('a-label-primary');
+    const ta = document.getElementById('a-primary');
+    if (lab) lab.textContent = mode === 'tts' ? 'Text to speak' : 'Prompt (describe the audio)';
+    if (ta) ta.placeholder = mode === 'tts' ? 'Enter words for the voice model…' : 'Describe music or sound…';
+  }
+
+  document.querySelectorAll('input[name="a-mode"]').forEach((r) => {
+    r.addEventListener('change', refreshAudioModelSelect);
+  });
 
   // -------- Router tab --------
 
@@ -860,6 +985,156 @@ print(expensive_items_eur)`
     }
   });
 
+  function findHttpsMediaUrl(obj, depth = 0) {
+    if (depth > 14 || obj == null) return null;
+    if (typeof obj === 'string' && /^https:\/\//.test(obj)) return obj;
+    if (typeof obj === 'object') {
+      if (typeof obj.url === 'string' && /^https:\/\//.test(obj.url)) return obj.url;
+      for (const v of Object.values(obj)) {
+        const u = findHttpsMediaUrl(v, depth + 1);
+        if (u) return u;
+      }
+    }
+    return null;
+  }
+
+  function asyncJobSucceeded(status) {
+    return status === 'COMPLETED' || status === 'COMPLETE';
+  }
+
+  async function pollAsyncInvokeUntilDone(requestId) {
+    const maxMs = 180000;
+    const interval = 1500;
+    const t0 = Date.now();
+    while (Date.now() - t0 < maxMs) {
+      const r = await apiFetch(`/api/async-invoke/${encodeURIComponent(requestId)}/status`);
+      let j = {};
+      try {
+        j = await r.json();
+      } catch { /* ignore */ }
+      if (!r.ok) return { ok: false, statusRes: j, error: 'status_http_' + r.status };
+      if (j.status === 'FAILED' || j.error) return { ok: false, statusRes: j };
+      if (asyncJobSucceeded(j.status)) return { ok: true, statusRes: j };
+      await new Promise((res) => setTimeout(res, interval));
+    }
+    return { ok: false, error: 'timeout' };
+  }
+
+  // -------- Audio tab --------
+  document.getElementById('a-send').addEventListener('click', async () => {
+    const btn = document.getElementById('a-send');
+    const meta = document.getElementById('a-meta');
+    const body = document.getElementById('a-body');
+    const card = document.getElementById('a-result');
+    const mode = document.querySelector('input[name="a-mode"]:checked').value;
+    const model_id = document.getElementById('a-model').value;
+    const text = document.getElementById('a-primary').value.trim();
+
+    card.classList.remove('error');
+    btn.disabled = true;
+    btn.innerHTML = 'Working<span class="loading"></span>';
+    body.innerHTML = `<div class="placeholder">Starting job…<span class="loading"></span></div>`;
+
+    if (!text) {
+      card.classList.add('error');
+      meta.innerHTML = `<div>Phase · <strong>—</strong></div>`;
+      body.innerHTML = `<div class="placeholder" style="color: var(--err)">Enter prompt or text.</div>`;
+      btn.disabled = false;
+      btn.textContent = 'Generate audio';
+      return;
+    }
+
+    let input;
+    if (mode === 'tts') {
+      input = { text };
+    } else {
+      const seconds_total = Math.min(120, Math.max(5, Number(document.getElementById('a-seconds').value) || 30));
+      input = { prompt: text, seconds_total };
+    }
+
+    const payload = { model_id, input };
+    const tWall = performance.now();
+
+    try {
+      meta.innerHTML = `<div>Phase · <strong>invoke</strong></div><div>Latency · <strong>—</strong></div><div>Model · <strong>${escapeHtml(model_id)}</strong></div>`;
+
+      const r0 = await apiFetch('/api/async-invoke', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const start = await r0.json();
+      const invokeMs = Math.round(performance.now() - tWall);
+
+      if (!r0.ok || start.error) {
+        card.classList.add('error');
+        meta.innerHTML = `<div>Phase · <strong>invoke failed</strong></div><div>Latency · <strong>${invokeMs} ms</strong></div>`;
+        body.innerHTML = `<div class="placeholder" style="color: var(--err)">${escapeHtml(JSON.stringify(start.error || start, null, 2))}</div>`;
+        return;
+      }
+
+      const requestId = start.request_id;
+      if (!requestId) {
+        card.classList.add('error');
+        body.innerHTML = `<div class="placeholder" style="color: var(--err)">No request_id in response.</div>`;
+        return;
+      }
+
+      let output = start.output;
+      let finalPayload = start;
+
+      if (!asyncJobSucceeded(start.status) || output == null) {
+        meta.innerHTML = `<div>Phase · <strong>polling</strong></div><div>Latency · <strong>${invokeMs} ms</strong></div><div>Model · <strong>${escapeHtml(model_id)}</strong></div><div>Request · <strong>${escapeHtml(requestId)}</strong></div>`;
+        body.innerHTML = `<div class="placeholder">Queued — polling status…<span class="loading"></span></div>`;
+
+        const polled = await pollAsyncInvokeUntilDone(requestId);
+        if (!polled.ok) {
+          card.classList.add('error');
+          meta.innerHTML = `<div>Phase · <strong>failed</strong></div><div>Latency · <strong>${Math.round(performance.now() - tWall)} ms</strong></div>`;
+          body.innerHTML = `<div class="placeholder" style="color: var(--err)">${escapeHtml(JSON.stringify(polled.statusRes || { error: polled.error }, null, 2))}</div>`;
+          return;
+        }
+
+        const r1 = await apiFetch(`/api/async-invoke/${encodeURIComponent(requestId)}`);
+        finalPayload = await r1.json();
+        if (!r1.ok || finalPayload.error) {
+          card.classList.add('error');
+          meta.innerHTML = `<div>Phase · <strong>result fetch failed</strong></div><div>Latency · <strong>${Math.round(performance.now() - tWall)} ms</strong></div>`;
+          body.innerHTML = `<div class="placeholder" style="color: var(--err)">${escapeHtml(JSON.stringify(finalPayload.error || finalPayload, null, 2))}</div>`;
+          return;
+        }
+        output = finalPayload.output;
+      }
+
+      const wallMs = Math.round(performance.now() - tWall);
+      meta.innerHTML = `
+        <div>Phase · <strong>done</strong></div>
+        <div>Latency · <strong>${wallMs} ms</strong> (wall)</div>
+        <div>Model · <strong>${escapeHtml(model_id)}</strong></div>
+        <div>Request · <strong>${escapeHtml(requestId)}</strong></div>
+      `;
+
+      const url = findHttpsMediaUrl(output) || findHttpsMediaUrl(finalPayload);
+      if (url) {
+        const safe = escapeHtml(url);
+        body.innerHTML = `
+          <audio class="audio-player" controls src="${safe}"></audio>
+          <div class="audio-json"><pre class="embed-preview">${escapeHtml(JSON.stringify(output ?? finalPayload, null, 2))}</pre></div>
+          <div class="img-actions"><a href="${safe}" download="do-audio-${Date.now()}">download</a></div>
+        `;
+      } else {
+        body.innerHTML = `<pre class="embed-preview">${escapeHtml(JSON.stringify(finalPayload, null, 2))}</pre>`;
+      }
+    } catch (e) {
+      card.classList.add('error');
+      meta.innerHTML = `<div>Phase · <strong>error</strong></div>`;
+      body.innerHTML = `<div class="placeholder" style="color: var(--err)">${escapeHtml(String(e))}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Generate audio';
+    }
+  });
+
   // Sidebar toggle (single state, two controls: tabs-bar button + sidebar ✕)
   function setSidebarOpen(open) {
     document.body.classList.toggle('sidebar-closed', !open);
@@ -898,14 +1173,36 @@ print(expensive_items_eur)`
       if (appCfg.accessRequired) signOutBtn.hidden = false;
     }
 
+    let cfgOk = false;
     try {
       const r = await fetch('/api/config');
-      appCfg = await r.json();
+      const text = await r.text();
+      let parsed = {};
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = {};
+      }
+      const ct = (r.headers.get('content-type') || '').toLowerCase();
+      cfgOk =
+        r.ok &&
+        ct.includes('json') &&
+        parsed &&
+        typeof parsed.baseUrl === 'string' &&
+        parsed.baseUrl.startsWith('https://');
+      appCfg = cfgOk ? parsed : {};
     } catch {
       appCfg = {};
     }
 
+    const warnEl = document.getElementById('backend-warning');
+    if (!cfgOk && warnEl) warnEl.hidden = false;
+
     applyServerCfg(appCfg);
+
+    if (!cfgOk) {
+      return;
+    }
 
     if (!appCfg.accessRequired) {
       await loadModels();
